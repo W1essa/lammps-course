@@ -1,0 +1,17 @@
+# Ignore output data and logs
+output/
+*.lammpstrj
+*.log
+*.data
+*.xyz
+*.lammps
+
+# Python & Jupyter
+__pycache__/
+*.pyc
+*.ipynb_checkpoints
+
+# Virtual environments & configs
+venv/
+.env/
+.vscode/
