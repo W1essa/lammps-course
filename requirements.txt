@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+jupyter
+ipykernel
+mdanalysis
+scikit-image
+opencv-python
+plotly
+ovito
