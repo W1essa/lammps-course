@@ -30,6 +30,8 @@ GRAPHITE_HEIGHT = 10.0   # A  — slab height used for plain graphite
 C_C_BOND        = 1.42   # A  — C-C bond length in graphene/graphite
 INTERLAYER_DIST = 3.35   # A  — interlayer spacing in graphite (experimental)
 
+A_LATTICE = C_C_BOND * np.sqrt(3)   # graphene lattice constant ~2.46 A
+
 # Passivation geometry constants
 C_C_MIN = 1.30  # A  — lower bound for a valid C-C bond
 C_C_MAX = 1.60  # A  — upper bound for a valid C-C bond
@@ -41,58 +43,33 @@ MIN_SEP = 0.85  # A  — minimum allowed distance after placing a hydrogen
 # =====================================================================
 
 def create_graphene_monolayer():
-    """
-    Build a rectangular monolayer graphene flake of size ~TARGET_L x TARGET_L.
-
-    ASE's graphene() builder produces a periodic sheet; we over-tile it
-    (nx x ny unit cells) and then trim stray atoms on the left/right edges
-    that fall outside the rectangular bounding box, leaving a clean flake.
-    """
-    a_graphene = C_C_BOND * np.sqrt(3)          # lattice constant ~2.46 A
-    nx = int(TARGET_L / a_graphene) + 5          # +5: safety margin before trim
-    ny = int(TARGET_L / a_graphene) + 5
+    """Build a rectangular monolayer graphene flake ~TARGET_L x TARGET_L."""
+    nx = int(TARGET_L / A_LATTICE) + 5
+    ny = int(TARGET_L / A_LATTICE) + 5
 
     monolayer = graphene(size=(nx, ny, 1), vacuum=50.0)
-    monolayer.center(axis=(0, 1), vacuum=0.0)    # remove lateral vacuum
+    monolayer.center(axis=(0, 1), vacuum=0.0)
 
-    positions = monolayer.get_positions()
-    x, y, z   = positions.T
-    tol        = 1e-3
-
-    # Determine the rectangular bounding box from the bottom and top rows
+    x, y, _ = monolayer.get_positions().T
+    tol = 1e-3
     x_min = x[np.abs(y - y.min()) < tol].min()
     x_max = x[np.abs(y - y.max()) < tol].max()
 
-    # Drop atoms that stick out beyond the box on the left or right
-    valid_mask = ~((x < x_min - tol) | (x > x_max + tol))
-    return monolayer[valid_mask]
+    valid = ~((x < x_min - tol) | (x > x_max + tol))
+    return monolayer[valid]
 
 
-def stack_graphite_layers(monolayer, slab_height, interlayer_dist, bond_length):
-    """
-    Stack copies of a graphene monolayer into an AB-stacked graphite slab.
-
-    Layer A sits at z = 0 (the input monolayer).
-    Layer B (odd indices) is shifted by (a/3, 0) in XY — the standard
-    crystallographic AB shift that places one B-sublattice atom above the
-    centre of each A hexagon.  The shift equals bond_length / sqrt(3) = a/3.
-    Even-indexed layers (next A) get no XY shift, recreating the ABA... sequence.
-    """
-    a_lattice    = bond_length * np.sqrt(3)      # graphene lattice constant
-    ab_shift_x   = a_lattice / 3.0               # correct AB shift ~0.82 A
-    # ab_shift_y stays 0 — shift is purely along the armchair (x) direction
-
-    graphite_slab = monolayer.copy()
+def stack_graphite_layers(monolayer, slab_height, interlayer_dist):
+    """Stack monolayer copies into an AA graphite slab (no lateral shift)."""
+    slab = monolayer.copy()
     layers_needed = int(np.ceil(slab_height / interlayer_dist)) + 1
 
     for layer_num in range(1, layers_needed):
         new_layer = monolayer.copy()
-        if layer_num % 2 == 1:                   # odd layer → B layer
-            new_layer.positions[:, 0] += ab_shift_x
         new_layer.positions[:, 2] += layer_num * interlayer_dist
-        graphite_slab.extend(new_layer)
+        slab.extend(new_layer)
 
-    return graphite_slab
+    return slab
 
 
 def generate_pillar_centers(x_range, y_range, radius, period):
@@ -367,13 +344,13 @@ if __name__ == "__main__":
 
     elif STRUCTURE_TYPE == "graphite":
         carbon_scaffold = stack_graphite_layers(
-            graphene_monolayer, GRAPHITE_HEIGHT, INTERLAYER_DIST, C_C_BOND
-        )
+    graphene_monolayer, GRAPHITE_HEIGHT, INTERLAYER_DIST
+)
 
     elif STRUCTURE_TYPE == "structured_graphite":
-        graphite_slab   = stack_graphite_layers(
-            graphene_monolayer, PILLAR_HEIGHT, INTERLAYER_DIST, C_C_BOND
-        )
+        graphite_slab = stack_graphite_layers(
+    graphene_monolayer, PILLAR_HEIGHT, INTERLAYER_DIST
+)
         carbon_scaffold = carve_pillars_from_graphite(
             graphite_slab, PILLAR_RADIUS, PILLAR_PERIOD
         )
