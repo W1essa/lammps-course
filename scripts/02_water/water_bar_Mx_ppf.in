@@ -1,0 +1,148 @@
+# ==============================================================================
+# 1. EXPORT MXENE DIMENSIONS
+# Reads the MXene sheet and writes its in-plane dimensions to build_dims_<term>.vars
+# ==============================================================================
+# Run:
+#   lmpgpu -var term oh    -in 02_water/water_bar_Mx_ppf.in
+#   lmpgpu -var term f     -in 02_water/water_bar_Mx_ppf.in
+#   lmpgpu -var term mix50 -in 02_water/water_bar_Mx_ppf.in
+# NOTE: 'mix50' must match the generator tag mix{int(OH_FRACTION*100)}
+
+# --- Termination selector ---
+variable term index f
+
+shell rm -f build_dims_${term}.vars
+
+units          real
+atom_style     full
+boundary       p p f
+
+# MXene data file for this termination
+variable mfile string ../data/mxene/mxene_${term}_initial.data
+read_data      ${mfile}
+
+# Group all MXene atom types (1-6: Ti, Ti, C, O, H, F; O/H empty for pure F sheet)
+group MX type 1 2 3 4 5 6
+
+# --- 2. Measure MXene extents ---
+compute xM_min MX reduce min x
+compute xM_max MX reduce max x
+compute yM_min MX reduce min y
+compute yM_max MX reduce max y
+compute zM_max MX reduce max z
+
+run 0 post no
+
+variable xmin_m equal c_xM_min
+variable xmax_m equal c_xM_max
+variable ymin_m equal c_yM_min
+variable ymax_m equal c_yM_max
+variable zmax_m equal c_zM_max
+
+variable Lx_m   equal ${xmax_m}-${xmin_m}
+variable Ly_m   equal ${ymax_m}-${ymin_m}
+variable xmid_m equal 0.5*(${xmax_m}+${xmin_m})
+variable ymid_m equal 0.5*(${ymax_m}+${ymin_m})
+
+# --- 3. Save reusable geometry variables (per termination) ---
+print "variable sys_xlo equal ${xmin_m}"  file   build_dims_${term}.vars screen no
+print "variable sys_xhi equal ${xmax_m}"  append build_dims_${term}.vars screen no
+print "variable sys_ylo equal ${ymin_m}"  append build_dims_${term}.vars screen no
+print "variable sys_yhi equal ${ymax_m}"  append build_dims_${term}.vars screen no
+
+print "variable Lx_m    equal ${Lx_m}"    append build_dims_${term}.vars screen no
+print "variable Ly_m    equal ${Ly_m}"    append build_dims_${term}.vars screen no
+print "variable xmid_m  equal ${xmid_m}"  append build_dims_${term}.vars screen no
+print "variable ymid_m  equal ${ymid_m}"  append build_dims_${term}.vars screen no
+print "variable zmaxMX  equal ${zmax_m}"  append build_dims_${term}.vars screen no
+
+clear
+
+
+# ==============================================================================
+# 2. BUILD WATER CYLINDER
+# Replicates equilibrated water, cuts a cylinder along Y axis
+# ==============================================================================
+
+# Re-declare after clear (command-line -var still takes priority)
+variable term index oh
+
+units          real
+atom_style     full
+boundary       p p p
+
+pair_style     zero 10.0 nocoeff
+bond_style     zero
+angle_style    zero
+kspace_style   none
+special_bonds  lj/coul 0.0 0.0 0.0
+
+variable wfile string ../data/water_equilibrated_for_droplet_nocoef.data
+read_data      ${wfile} nocoeff
+
+# --- 4. Dummy coeffs for initialization ---
+pair_coeff      * *
+bond_coeff      1 1.0
+angle_coeff     1 109.47
+
+# Water types in the source file: 1-O, 2-H
+mass           1 15.9994
+mass           2 1.008
+
+include        build_dims_${term}.vars
+
+# --- 5. Extend water along Y to match MXene length ---
+variable Ny equal ceil(${Ly_m}/ly) + 1
+replicate 1 ${Ny} 1 bond/periodic
+
+group          W type 1 2
+
+# --- 6. Cut cylindrical water region ---
+# wx: centers the cylinder on the ACTUAL center of the water molecules;
+# it is moved to the MXene center later at the merging step.
+# R is kept identical across terminations for a clean OH/F comparison.
+variable wx equal xcm(W,x)
+variable wz equal xcm(W,z)
+variable R  equal 25.0
+
+region         keep_cyl cylinder y ${wx} ${wz} ${R} EDGE EDGE units box
+group          keep region keep_cyl
+group          drop subtract W keep
+delete_atoms   group drop mol yes
+
+group          W clear
+group          W type 1 2
+
+# --- 7. Rebuild molecule IDs ---
+reset_atoms    mol W compress yes offset 0 single no
+
+# --- 8. Increase communication range for image repair ---
+comm_modify    cutoff 400.0
+
+# --- 9. Rebuild image flags consistently ---
+set            group W image 0 0 0
+reset_atoms    image W
+
+# --- 10. Remove molecules touching the periodic Y seam ---
+variable       edge equal 2.0
+region         ylo_edge block INF INF EDGE $(ylo+v_edge) INF INF units box
+region         yhi_edge block INF INF $(yhi-v_edge) EDGE INF INF units box
+group          seam_lo region ylo_edge
+group          seam_hi region yhi_edge
+group          seam union seam_lo seam_hi
+delete_atoms   group seam mol yes
+
+group          W clear
+group          W type 1 2
+
+# --- 11. Final topology cleanup ---
+reset_atoms    mol W compress yes offset 0 single no
+set            group W image 0 0 0
+reset_atoms    image W
+comm_modify    cutoff 10.0
+velocity       all set 0.0 0.0 0.0 units box
+
+# Write the final water cylinder (per termination)
+write_data     ../data/mxene/water_cylinder_mxene_${term}.data nocoeff
+
+print "SUCCESS: water cylinder (${term} sheet dims) written."

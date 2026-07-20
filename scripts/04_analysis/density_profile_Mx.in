@@ -1,0 +1,72 @@
+# ==============================================================================
+# 2D DENSITY PROFILE - ROBUST VERSION
+# ==============================================================================
+
+units           real
+atom_style      full
+boundary        p p f
+
+# Create directories just in case
+shell           mkdir -p ../data/mxene
+
+# --- 1. Selectors ---
+variable        term  index oh      # oh / f / mix
+variable        block index 0       # 0 = full, 1-4 = blocks
+
+variable        datafile string ../data/mxene/equil_mxene_${term}.data
+variable        dumpfile string ../dump/mxene_${term}_wetting.lammpstrj
+
+# --- 2. Step Logic ---
+# Production length: 1,000,000 steps. Dump interval: 5,000 steps.
+variable        blocklen equal 250000
+
+if "${block} == 0" then &
+  "variable firststep equal 5000" &
+  "variable laststep  equal 1000000" &
+  "variable outfile   string ../data/mxene/density_${term}_full.dat" &
+else &
+  "variable firststep equal (v_block-1)*v_blocklen+5000" &
+  "variable laststep  equal v_block*v_blocklen" &
+  "variable outfile   string ../data/mxene/density_${term}_block${block}.dat"
+
+# --- 3. Read Structure ---
+read_data       ${datafile}
+# Increase neighbor skin for rerun stability
+neighbor        2.0 bin
+comm_modify     cutoff 5.0
+
+# --- 4. Dummy Setup ---
+pair_style      zero 10.0
+pair_coeff      * *
+bond_style      zero
+bond_coeff      1 1.0
+angle_style     zero
+angle_coeff     1 109.47
+
+group           Water type 1 2
+
+# --- 5. Chunking ---
+# x and z bins 0.5 A. Box-centered.
+compute         Grid Water chunk/atom bin/2d x lower 0.5 z lower 0.5 units box
+
+# --- 6. Averaging Setup ---
+# nevery: interval in the dump (5000)
+# nrepeat: frames per block (250k / 5k = 50)
+# nfreq: when to write the file. Must be reached by rerun!
+variable        nevery  equal 5000
+variable        nrepeat equal (v_laststep-v_firststep)/v_nevery+1
+variable        nfreq   equal ${laststep}
+
+# USE "ave one" to overwrite/create a single file at the end of the block
+fix             Profile Water ave/chunk ${nevery} ${nrepeat} ${nfreq} &
+                Grid density/mass ave one file ${outfile}
+
+# --- 7. Rerun Command ---
+# 'stop' ensures we don't look for frames that don't exist
+print ">>> RERUNNING: ${term} Block ${block} | Output: ${outfile}"
+
+rerun           ${dumpfile} first ${firststep} last ${laststep} stop ${laststep} &
+                dump x y z box yes replace yes
+
+# If the file wasn't written, it's because laststep wasn't found in the dump
+print ">>> DONE. Check if ${outfile} exists."

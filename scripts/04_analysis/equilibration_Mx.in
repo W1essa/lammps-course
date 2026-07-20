@@ -1,0 +1,182 @@
+# ==============================================================================
+# EQUILIBRATION + PRODUCTION: SPC/E WATER ON RIGID MXENE (Ti3C2Tx)
+# Force field: IFF (Heinz group, ChemRxiv 2025, doi:10.26434/chemrxiv-2025-212s7)
+#              + SPC/E water (Berendsen 1987)
+#
+# Run (full):
+#   lmpgpu -var term oh -in 04_analysis/equilibration_Mx.in
+#   lmpgpu -var term f  -in 04_analysis/equilibration_Mx.in
+#
+# Timing probe (no production):
+#   lmpgpu -var term oh -var eqsteps 5000 -var nblocks 0 -in 04_analysis/equilibration_Mx.in
+#
+# Atom types after merge:
+#   1 = OW   2 = HW   3 = ti1   4 = ti2   5 = cx   6 = omx   7 = hoy   8 = fx
+#
+# Outputs:
+#   log_equil_<term>.lammps        full log (thermo, performance, warnings)
+#   run_info_<term>.txt            baseline + checkpoint values, key-value
+#   mxene_<term>_eq.lammpstrj      equilibration trajectory
+#   mxene_<term>_wetting.lammpstrj production trajectory (contact angle)
+#   equil_mxene_<term>_block<N>.data  snapshot after each production block
+#   restart_<term>.1/.2            rolling binary restarts
+# ==============================================================================
+
+# --- 0. Persistent log ---
+log             ../data/mxene/log_equil_oh.lammps
+# NOTE: 'log' runs before -var substitution is guaranteed on line 1 tools;
+# re-issue with term below once variables exist.
+
+# --- 1. Folders ---
+shell           mkdir -p ../data/mxene
+shell           mkdir -p ../dump
+
+# --- 2. Initialization ---
+units           real
+dimension       3
+boundary        p p f
+atom_style      full
+package gpu 1 neigh no
+newton          off
+processors      * * 1                  # thin slab: never cut domains along z
+
+bond_style      harmonic
+angle_style     harmonic
+
+# --- 3. Files and parameters ---
+variable        term       index oh        # -var term f/mix
+variable        eqsteps    index 1000000   # 2 ns equilibration
+variable        nblocks    index 4         # production blocks
+variable        blocksteps index 250000    # 0.5 ns per block -> 2 ns total
+variable        infile  string ../data/mxene/merged_mxene_${term}_water.data
+variable        outfile string ../data/mxene/equil_mxene_${term}.data
+variable        dumpout string ../dump/mxene_${term}_wetting.lammpstrj
+variable        info    string ../data/mxene/run_info_${term}.txt
+
+# Switch log to termination-specific file
+log             ../data/mxene/log_equil_${term}.lammps append
+
+# --- 4. Read data ---
+read_data       ${infile} nocoeff
+
+# Trim vacuum: PPPM grid scales with box z (x3 due to slab correction)
+change_box      all z final -20.0 130.0 units box
+
+# --- 5. Groups ---
+group           water      type 1 2
+group           mxene      type 3 4 5 6 7 8
+
+# --- 5a. Run info file (survives any log/terminal loss) ---
+variable        z_top  equal bound(mxene,zmax)
+variable        z_wtop equal bound(water,zmax)
+print "z_baseline  $(v_z_top:%.3f)" file ${info} screen no
+
+# --- 6. Charges (IFF + SPC/E) ---
+set type 1 charge -0.8476   # OW
+set type 2 charge  0.4238   # HW
+set type 3 charge  0.35     # ti1
+set type 4 charge  0.675    # ti2
+set type 5 charge -0.35     # cx
+set type 6 charge -0.7875   # omx
+set type 7 charge  0.2875   # hoy
+set type 8 charge -0.5      # fx
+
+# --- 7. Nonbonded model ---
+pair_style      lj/cut/coul/long 12.0
+pair_modify     mix arithmetic
+kspace_style    pppm 1.0e-4
+kspace_modify   slab 3.0
+
+# --- 8. Neighbor optimization ---
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes one 10000
+
+# Skip pair terms inside the frozen substrate.
+# NOTE: PPPM still sees all charges -> absolute PE is meaningless;
+# monitor c_Twat and droplet shape instead.
+neigh_modify    exclude group mxene mxene
+
+special_bonds   lj/coul 0.0 0.0 0.0
+
+# --- 9. LJ self-interactions (cross terms via LB mixing) ---
+pair_coeff      1 1  0.1553   3.166     # OW
+pair_coeff      2 2  0.0000   0.000     # HW
+pair_coeff      3 3  0.20     2.0045    # ti1
+pair_coeff      4 4  0.20     2.0045    # ti2
+pair_coeff      5 5  0.07     3.3854    # cx
+pair_coeff      6 6  0.15     3.1182    # omx
+pair_coeff      7 7  0.015    0.9666    # hoy
+pair_coeff      8 8  0.15     2.9400    # fx
+
+# --- 10. Substrate freezing ---
+velocity        mxene set 0.0 0.0 0.0 units box
+fix             freeze mxene setforce 0.0 0.0 0.0
+
+# --- 11. Reflective wall at top ---
+fix             wall_top water wall/reflect zhi EDGE
+
+# --- 12. Water bonds (placeholders, geometry held by SHAKE) ---
+bond_coeff      1 1000.0  1.0
+angle_coeff     1 1000.0  109.47
+
+# --- 13. Static load balance ---
+# Water domains are expensive, frozen MXene is nearly free.
+# (fix balance is incompatible with pppm/gpu, so one-shot only.)
+balance         1.1 shift xy 20 1.05 weight time 1.0
+
+# --- 14. Minimization ---
+print ">>> MINIMIZING SYSTEM <<<"
+min_style       fire
+minimize        1.0e-4 1.0e-6 2000 10000
+reset_timestep  0
+
+# --- 15. Dynamics ---
+compute         Twat water temp
+velocity        water create 300.0 12345 mom yes rot yes dist gaussian
+
+fix             lang water langevin 300.0 300.0 100.0 699483
+fix_modify      lang temp Twat
+fix             nve  water nve
+fix             shk water shake 1.0e-4 20 0 b 1 a 1
+
+# --- 16. Output ---
+# 2.0 fs: SHAKE removes O-H stretch/bend; fastest remaining motion is
+# water libration (~30-50 fs) -> 2 fs is the safe standard for rigid water.
+timestep        2.0
+thermo_style    custom step c_Twat pe ke etotal atoms
+thermo          1000
+restart         100000 ../data/mxene/restart_${term}.1 ../data/mxene/restart_${term}.2
+
+# ==============================================================================
+# PHASE 1: EQUILIBRATION (2 ns)
+# ==============================================================================
+dump            d_eq water custom 20000 ../dump/mxene_${term}_eq.lammpstrj id type x y z
+print ">>> STARTING EQUILIBRATION (${eqsteps} steps) <<<"
+run             ${eqsteps}
+undump          d_eq
+
+print "posteq_water_top  $(v_z_wtop:%.3f)" append ${info} screen no
+write_data      ../data/mxene/equil_mxene_${term}_posteq.data nocoeff
+
+# ==============================================================================
+# PHASE 2: PRODUCTION in blocks (nblocks x 0.5 ns)
+# Continuous dynamics, single dump file; snapshot + info entry per block.
+# Contact angle: compute per block in post-processing, check for plateau;
+# if still drifting, restart from the last block and append more.
+# ==============================================================================
+reset_timestep  0
+dump            d_prod water custom 5000 ${dumpout} id type x y z
+
+label           prod_loop
+variable        ib loop ${nblocks}
+print ">>> PRODUCTION BLOCK ${ib} of ${nblocks} <<<"
+run             ${blocksteps}
+print "block_${ib}_water_top  $(v_z_wtop:%.3f)" append ${info} screen no
+write_data      ../data/mxene/equil_mxene_${term}_block${ib}.data nocoeff
+next            ib
+jump            SELF prod_loop
+
+# --- 17. Final write ---
+write_data      ${outfile} nocoeff
+print "final_water_top  $(v_z_wtop:%.3f)" append ${info} screen no
+print "SUCCESS: MXene wetting (${term}): ${eqsteps} eq + ${nblocks}x${blocksteps} prod steps."

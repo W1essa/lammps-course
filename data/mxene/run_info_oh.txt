@@ -1,0 +1,7 @@
+z_baseline  9.250
+posteq_water_top  83.021
+block_1_water_top  117.057
+block_2_water_top  60.920
+block_3_water_top  51.554
+block_4_water_top  49.259
+final_water_top  49.259

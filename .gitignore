@@ -68,3 +68,10 @@ data/graphene_flat*
 data/graphene_pillars*
 data/restart_*.data
 data/water_droplet_packed.xyz
+
+# --- MXene simulation outputs (large, regenerated per run) ---
+# Keep run_info_*.txt (tiny, human-readable baseline/checkpoint values)
+data/mxene/equil_mxene_*.data
+data/mxene/density_*.dat
+data/mxene/mxene_*_initial.data
+data/mxene/water_cylinder_mxene*.data
