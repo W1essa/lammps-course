@@ -89,15 +89,23 @@ CONFIGS: Dict[str, SystemConfig] = {
         n_win_shifts=1,
         substrate_types=(3, 4, 5, 6, 7, 8)
     ),
+    "mxene_ohflex": SystemConfig(
+        name="MXene Ti$_3$C$_2$(OH)$_2$ (mobile H)",
+        density_file="../data/mxene/density_ohflex_{block}.dat",
+        data_file="../data/mxene/equil_mxene_ohflex.data",
+        out_dir="../output/mxene",
+        is_flat=True,
+        substrate_types=(3, 4, 5, 6, 7, 8)
+    ),
 }
 
 # --- ACTIVE SYSTEM SELECTION ---
-SYSTEM_NAME = "mxene_f"
+SYSTEM_NAME = "mxene_ohflex"
 CFG = CONFIGS[SYSTEM_NAME]
 
 # Blocks to analyze. Names must match the density_profile_Mx.in outputs.
 # For non-MXene systems (no {block} in path) use BLOCKS = [""].
-BLOCKS = ["block1", "block2", "block3", "block4", "full"]
+BLOCKS = ["block1", "block2", "block3", "full"]
 
 
 @dataclass
