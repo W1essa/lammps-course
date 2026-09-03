@@ -1,72 +1,119 @@
 # ==============================================================================
-# 2D DENSITY PROFILE - ROBUST VERSION
+# 2D DENSITY PROFILE - SUPPORTING RIGID (oh, f) AND FLEX (ohflex) RUNS
+#
+# ohflex: single continuous trajectory 0 -> 2480000 from the final flex-H run.
+# The old *_cont files belong to the earlier crashed attempt - do not mix them.
+#
+# Run (all blocks + full):
+#   for b in 1 2 3 0; do
+#     lmpgpu -var term ohflex -var block $b -in 04_analysis/density_profile_Mx.in
+#   done
 # ==============================================================================
 
 units           real
 atom_style      full
 boundary        p p f
 
-# Create directories just in case
 shell           mkdir -p ../data/mxene
 
 # --- 1. Selectors ---
-variable        term  index oh      # oh / f / mix
+variable        term  index oh      # oh / f / mix / ohflex
 variable        block index 0       # 0 = full, 1-4 = blocks
 
+# --- 2. System Configuration Branching ---
+
+# Default settings for rigid systems (dt = 2.0 fs, dump every 5000 steps)
+variable        nevery   equal 5000
+variable        blocklen equal 250000
 variable        datafile string ../data/mxene/equil_mxene_${term}.data
 variable        dumpfile string ../dump/mxene_${term}_wetting.lammpstrj
 
-# --- 2. Step Logic ---
-# Production length: 1,000,000 steps. Dump interval: 5,000 steps.
-variable        blocklen equal 250000
+# ohflex: dt = 0.5 fs, dump every 20000 steps.
+# block2 snapshot is the last valid write of this run (block3 was cut short).
+if "${term} == ohflex" then &
+  "variable nevery   equal 20000" &
+  "variable datafile string ../data/mxene/equil_mxene_ohflex_block2.data"
 
-if "${block} == 0" then &
+# --- 3. Step Arithmetic & File Assignments ---
+
+# Case A: Standard Rigid Systems (oh, f, mix)
+if "${term} != ohflex && ${block} == 0" then &
   "variable firststep equal 5000" &
   "variable laststep  equal 1000000" &
-  "variable outfile   string ../data/mxene/density_${term}_full.dat" &
-else &
+  "variable nrepeat   equal 200" &
+  "variable outfile   string ../data/mxene/density_${term}_full.dat"
+
+if "${term} != ohflex && ${block} > 0" then &
   "variable firststep equal (v_block-1)*v_blocklen+5000" &
   "variable laststep  equal v_block*v_blocklen" &
+  "variable nrepeat   equal 50" &
   "variable outfile   string ../data/mxene/density_${term}_block${block}.dat"
 
-# --- 3. Read Structure ---
+# Case B: Flexible System (ohflex), one continuous dump file
+if "${term} == ohflex && ${block} == 1" then &
+  "variable firststep equal 20000" &
+  "variable laststep  equal 1000000" &
+  "variable nrepeat   equal 50" &
+  "variable outfile   string ../data/mxene/density_ohflex_block1.dat"
+
+if "${term} == ohflex && ${block} == 2" then &
+  "variable firststep equal 1020000" &
+  "variable laststep  equal 2000000" &
+  "variable nrepeat   equal 50" &
+  "variable outfile   string ../data/mxene/density_ohflex_block2.dat"
+
+# block3 is short (0.23 ns) - run ended at 2497561, last full frame 2480000
+if "${term} == ohflex && ${block} == 3" then &
+  "variable firststep equal 2020000" &
+  "variable laststep  equal 2480000" &
+  "variable nrepeat   equal 24" &
+  "variable outfile   string ../data/mxene/density_ohflex_block3.dat"
+
+if "${term} == ohflex && ${block} == 0" then &
+  "variable firststep equal 20000" &
+  "variable laststep  equal 2480000" &
+  "variable nrepeat   equal 124" &
+  "variable outfile   string ../data/mxene/density_ohflex_full.dat"
+
+variable        nfreq equal ${laststep}
+
+print "=============================================="
+print "Termination : ${term}"
+print "Block       : ${block} (0 = full)"
+print "Steps       : ${firststep} -> ${laststep}"
+print "Datafile    : ${datafile}"
+print "Dumpfile    : ${dumpfile}"
+print "Output      : ${outfile}"
+print "=============================================="
+
+# --- 4. Read Structure ---
 read_data       ${datafile}
-# Increase neighbor skin for rerun stability
 neighbor        2.0 bin
 comm_modify     cutoff 5.0
 
-# --- 4. Dummy Setup ---
+# --- 5. Dummy Setup (Wildcards * to cover all bond/angle types) ---
 pair_style      zero 10.0
 pair_coeff      * *
+
 bond_style      zero
-bond_coeff      1 1.0
+bond_coeff      * 1.0
+
 angle_style     zero
-angle_coeff     1 109.47
+angle_coeff     * 109.47
 
 group           Water type 1 2
 
-# --- 5. Chunking ---
-# x and z bins 0.5 A. Box-centered.
+# --- 6. Chunking ---
 compute         Grid Water chunk/atom bin/2d x lower 0.5 z lower 0.5 units box
 
-# --- 6. Averaging Setup ---
-# nevery: interval in the dump (5000)
-# nrepeat: frames per block (250k / 5k = 50)
-# nfreq: when to write the file. Must be reached by rerun!
-variable        nevery  equal 5000
-variable        nrepeat equal (v_laststep-v_firststep)/v_nevery+1
-variable        nfreq   equal ${laststep}
-
-# USE "ave one" to overwrite/create a single file at the end of the block
+# --- 7. Averaging Setup ---
 fix             Profile Water ave/chunk ${nevery} ${nrepeat} ${nfreq} &
                 Grid density/mass ave one file ${outfile}
 
-# --- 7. Rerun Command ---
-# 'stop' ensures we don't look for frames that don't exist
+# --- 8. Rerun Execution ---
 print ">>> RERUNNING: ${term} Block ${block} | Output: ${outfile}"
-
 rerun           ${dumpfile} first ${firststep} last ${laststep} stop ${laststep} &
                 dump x y z box yes replace yes
 
-# If the file wasn't written, it's because laststep wasn't found in the dump
-print ">>> DONE. Check if ${outfile} exists."
+unfix           Profile
+print "SUCCESS: density profile written to ${outfile}"
