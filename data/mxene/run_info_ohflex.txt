@@ -1,0 +1,5 @@
+z_baseline  9.250
+posteq_water_top  81.328
+posteq_water_top  55.081
+block_1_water_top  112.459
+block_2_water_top  122.314
