@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import os
 import numpy as np
-
+from surface_profiles import PROFILE, apply_profile, tag_suffix
+import surface_profiles
+surface_profiles.IFF_CHARGE = {k: v[1] for k, v in TYPES.items()}
 # =====================================================================
 # --- CONFIGURATION PARAMETERS ---
 # =====================================================================
@@ -197,11 +199,13 @@ if __name__ == "__main__":
     output_dir = os.path.join(root_dir, "data", "mxene")
     os.makedirs(output_dir, exist_ok=True)
     tag = TERMINATION.lower() if TERMINATION != 'MIX' else f"mix{int(OH_FRACTION*100)}"
+    tag = tag + tag_suffix(PROFILE)
     output_file = os.path.join(output_dir, f"mxene_{tag}_initial.data")
 
     print(f"[INFO] Generating Ti3C2Tx sheet, termination = {TERMINATION}...")
 
     mxene_atoms = build_mxene_sheet()
+    mxene_atoms = apply_profile(mxene_atoms, PROFILE)
     check_structure(mxene_atoms)
     write_lammps_full(mxene_atoms, output_file)
 
