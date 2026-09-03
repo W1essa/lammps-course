@@ -1,0 +1,186 @@
+# ==============================================================================
+# FLEXIBLE-SUBSTRATE EQUILIBRATION
+#
+# Variant is chosen with -var term:
+#   ohflex : mobile hydroxyl H (type 7), dt 0.5 fs, requires O-H bonds in the
+#            data file (patch_topology.py) -> reads equil_mxene_oh_topo.data
+#   fflex  : mobile fluorine (type 8), dt 2.0 fs, no topology patch
+#            -> reads equil_mxene_f.data
+#
+# Both start from an ALREADY EQUILIBRATED frozen droplet: water keeps its
+# velocities from the data file, only the mobile termination gets new ones.
+#
+# Run:
+#   lmpgpu -var term fflex  -in 04_analysis/equilibration_Mx_flex.in
+# Micro-test (always first):
+#   lmpgpu -var term fflex -var eqsteps 2000 -var nblocks 2 -var blocksteps 1000 \
+#          -in 04_analysis/equilibration_Mx_flex.in
+# Adding a new flex variant = one branch in sections 2a-2c.
+# ==============================================================================
+
+# --- 1. Initialization ---
+units           real
+atom_style      full
+bond_style      harmonic
+angle_style     harmonic
+boundary        p p f
+processors      * * 1
+package gpu 1 neigh no
+newton          off
+
+variable        term index fflex
+log             ../data/mxene/log_equil_${term}.lammps
+
+# --- 2a. Variant: mobile type, timestep, cadence ---
+variable        mtype equal 8            # fflex default: fluorine
+variable        dt    equal 2.0
+variable        deq   equal 20000        # eq-dump interval
+variable        dprod equal 5000         # production dump interval
+variable        rsint equal 100000       # restart interval
+variable        vseed equal 77777
+variable        lseed equal 131313
+if "${term} == ohflex" then variable        ktether equal 50.0       # fflex: harmonic tether, kcal/mol/A^2 &
+  "variable ktether equal 0.0" &
+  "variable mtype equal 7" &
+  "variable dt    equal 0.5" &
+  "variable deq   equal 80000" &
+  "variable dprod equal 20000" &
+  "variable rsint equal 200000" &
+  "variable vseed equal 54321" &
+  "variable lseed equal 424242"
+
+# --- 2b. Variant: run lengths (command-line -var still wins) ---
+if "${term} == ohflex" then &
+  "variable def_eq equal 1000000" &
+  "variable def_nb equal 3" &
+  "variable def_bs equal 1000000" &
+else &
+  "variable def_eq equal 250000" &
+  "variable def_nb equal 4" &
+  "variable def_bs equal 250000"
+variable        eqsteps    index ${def_eq}
+variable        nblocks    index ${def_nb}
+variable        blocksteps index ${def_bs}
+
+# --- 2c. Variant: input file ---
+variable        def_in string ../data/mxene/equil_mxene_f.data
+if "${term} == ohflex" then &
+  "variable def_in string ../data/mxene/equil_mxene_oh_topo.data"
+variable        infile index ${def_in}
+
+variable        outfile string ../data/mxene/equil_mxene_${term}.data
+variable        info    string ../data/mxene/run_info_${term}.txt
+
+# --- 3. Read data ---
+read_data       ${infile} nocoeff
+change_box      all z final -20.0 130.0 units box
+
+# --- 4. Groups: frozen = everything mxene except the mobile termination ---
+group           water   type 1 2
+group           mxene   type 3 4 5 6 7 8
+group           mobileT type ${mtype}
+group           frozen  subtract mxene mobileT
+group           dumpeq union water mobileT
+
+variable        z_top  equal bound(mxene,zmax)
+variable        z_wtop equal bound(water,zmax)
+print "z_baseline  $(v_z_top:%.3f)" file ${info} screen no
+
+# --- 5. Charges ---
+set type 1 charge -0.8476
+set type 2 charge  0.4238
+set type 3 charge  0.35
+set type 4 charge  0.675
+set type 5 charge -0.35
+set type 6 charge -0.7875
+set type 7 charge  0.2875
+set type 8 charge -0.5
+
+# --- 6. Nonbonded model ---
+pair_style      lj/cut/coul/long 12.0
+pair_modify     mix arithmetic
+kspace_style    pppm 1.0e-4
+kspace_modify   slab 3.0
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes one 10000
+neigh_modify    exclude group frozen frozen
+comm_modify     cutoff 25.0
+special_bonds   lj/coul 0.0 0.0 0.0
+
+pair_coeff      1 1  0.1553   3.166
+pair_coeff      2 2  0.0000   0.000
+pair_coeff      3 3  0.20     2.0045
+pair_coeff      4 4  0.20     2.0045
+pair_coeff      5 5  0.07     3.3854
+pair_coeff      6 6  0.15     3.1182
+pair_coeff      7 7  0.015    0.9666
+pair_coeff      8 8  0.15     2.9400
+
+# --- 7. Freezing + wall ---
+velocity        frozen set 0.0 0.0 0.0 units box
+fix             freeze frozen setforce 0.0 0.0 0.0
+fix             wall_top water wall/reflect zhi EDGE
+
+# --- 8. Bonded coeffs (wildcards cover 1 or 2 bond types) ---
+bond_coeff      * 1000.0  1.0
+angle_coeff     * 1000.0  109.47
+if "${term} == ohflex" then "bond_coeff 2 495.0 0.929"   # omx-hoy, IFF hydroxyl
+
+balance         1.1 shift xy 20 1.05 weight time 1.0
+reset_timestep  0
+
+# --- 9. Dynamics ---
+compute         Twat water   temp
+compute         Tmob mobileT temp
+
+# water keeps its equilibrated velocities - no velocity create here
+fix             langM mobileT langevin 300.0 300.0 50.0 ${lseed}
+fix_modify      lang temp Twat
+fix             nve  water nve
+
+velocity        mobileT create 300.0 ${vseed} dist gaussian
+fix             langM mobileT langevin 300.0 300.0 100.0 ${lseed}
+fix_modify      langM temp Tmob
+fix             nveM  mobileT nve
+# F is held only by nonbonded terms against a rigid lattice, which loses to
+# hydration. Tether it to its lattice site: K=50 gives ~0.19 A RMS at 300 K.
+# ohflex needs no tether - the O-H bond is one.
+if "${term} != ohflex" then "fix tether mobileT spring/self 50.0"
+
+fix             shk water shake 1.0e-4 20 0 b 1 a 1
+
+# max displacement of mobile atoms from their start positions
+compute         dsp  mobileT displace/atom
+compute         maxd mobileT reduce max c_dsp[4]
+
+# --- 10. Output ---
+timestep        ${dt}
+thermo_style    custom step c_Twat c_Tmob c_maxd pe ke etotal atoms
+thermo          1000
+restart         ${rsint} ../data/mxene/restart_${term}.1 ../data/mxene/restart_${term}.2
+
+# --- PHASE 1: re-equilibration under the new mobility ---
+dump            d_eq dumpeq custom ${deq} ../dump/mxene_${term}_eq.lammpstrj id type x y z
+print ">>> RE-EQUILIBRATION (${eqsteps} steps, dt ${dt} fs) <<<"
+run             ${eqsteps}
+undump          d_eq
+print "posteq_water_top  $(v_z_wtop:%.3f)" append ${info} screen no
+write_data      ../data/mxene/equil_mxene_${term}_posteq.data nocoeff
+
+# --- PHASE 2: production in blocks ---
+reset_timestep  0
+dump            d_prod water custom ${dprod} ../dump/mxene_${term}_wetting.lammpstrj id type x y z
+
+label           prod_loop
+variable        ib loop ${nblocks}
+print ">>> PRODUCTION BLOCK ${ib} of ${nblocks} <<<"
+run             ${blocksteps}
+print "block_${ib}_water_top  $(v_z_wtop:%.3f)" append ${info} screen no
+write_data      ../data/mxene/equil_mxene_${term}_block${ib}.data nocoeff
+next            ib
+jump            SELF prod_loop
+
+write_data      ${outfile} nocoeff
+print "final_water_top  $(v_z_wtop:%.3f)" append ${info} screen no
+print "SUCCESS: ${term}: ${eqsteps} eq + ${nblocks}x${blocksteps} prod steps."
